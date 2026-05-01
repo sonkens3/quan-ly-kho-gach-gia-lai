@@ -43,7 +43,7 @@ export function AppShell({
             </span>
             <span className="min-w-0">
               <span className="block truncate text-lg font-semibold leading-tight text-slate-950">
-                Kho gạch Kon Tum
+                Kho gạch Gia Lai
               </span>
             </span>
           </Link>
@@ -60,7 +60,7 @@ export function AppShell({
                 <span className="flex h-9 w-9 items-center justify-center rounded-md bg-cyan-700 text-white">
                   <Warehouse className="h-4 w-4" aria-hidden="true" />
                 </span>
-                <span className="truncate text-base font-semibold text-slate-950">Kho gạch Kon Tum</span>
+                <span className="truncate text-base font-semibold text-slate-950">Kho gạch Gia Lai</span>
               </Link>
 
               <div className="hidden min-w-0 lg:block">

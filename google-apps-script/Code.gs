@@ -99,7 +99,7 @@ const BACKUP_TABLES = {
   auditLogs: "audit_logs",
 };
 
-const DRIVE_BACKUP_FOLDER_NAME = "KhoGachKonTum-Backups";
+const DRIVE_BACKUP_FOLDER_NAME = "KhoGachGiaLai-Backups";
 const DRIVE_BACKUP_LATEST_FILE = "kho-gach-backup-latest.json";
 const DRIVE_BACKUP_FILE_PREFIX = "kho-gach-backup-";
 const DRIVE_BACKUP_KEEP_FILES = 100;
