@@ -2,11 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  fetchSheetSnapshot,
+  fetchSheetMeta,
+  fetchSheetSnapshotWithMeta,
   formDataToPayload,
   isSheetConfigured,
   loadSheetConfig,
-  mutateSheet,
+  mutateSheetWithMeta,
+  postMutateSheetWithMeta,
+  type SheetConfig,
 } from "@/lib/google-sheets/client";
 import { createBackup, createSeedLocalBackup, localDataKey, type LocalBackup } from "@/lib/local/free-mode";
 import {
@@ -36,6 +39,19 @@ type ActionResult = {
 
 type SyncMode = "local" | "google-sheet";
 
+const sheetCacheKey = "tile_warehouse_sheet_cache";
+const sheetMetaPollMs = 15000;
+
+type SheetCache = {
+  app: "tile-warehouse-app";
+  source: "google-sheet";
+  version: 1;
+  endpoint: string;
+  revision: string;
+  syncedAt: string;
+  data: WarehouseData;
+};
+
 function parseBackup(raw: string | null): LocalBackup | null {
   if (!raw) {
     return null;
@@ -54,8 +70,55 @@ function parseBackup(raw: string | null): LocalBackup | null {
   }
 }
 
+function parseSheetCache(raw: string | null, config: SheetConfig): SheetCache | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<SheetCache>;
+
+    if (
+      parsed.app !== "tile-warehouse-app" ||
+      parsed.source !== "google-sheet" ||
+      parsed.version !== 1 ||
+      parsed.endpoint !== config.endpoint ||
+      !parsed.data
+    ) {
+      return null;
+    }
+
+    return parsed as SheetCache;
+  } catch {
+    return null;
+  }
+}
+
+function readSheetCache(config: SheetConfig) {
+  return parseSheetCache(window.localStorage.getItem(sheetCacheKey), config);
+}
+
 function writeData(data: WarehouseData) {
   window.localStorage.setItem(localDataKey, JSON.stringify(createBackup(data)));
+}
+
+function writeSheetCache(config: SheetConfig, data: WarehouseData, revision: string) {
+  const cache: SheetCache = {
+    app: "tile-warehouse-app",
+    source: "google-sheet",
+    version: 1,
+    endpoint: config.endpoint,
+    revision,
+    syncedAt: new Date().toISOString(),
+    data,
+  };
+
+  window.localStorage.setItem(sheetCacheKey, JSON.stringify(cache));
+  writeData(data);
+}
+
+function formatSyncTime(value: string | Date) {
+  return new Date(value).toLocaleTimeString("vi-VN");
 }
 
 function makeAudit(action: string, tableName: string, recordCode: string, note: string): AuditLog {
@@ -83,50 +146,109 @@ export function useWarehouseStore() {
   const [data, setData] = useState<WarehouseData | null>(null);
   const [lastMessage, setLastMessage] = useState<string | null>(null);
   const [syncMode, setSyncMode] = useState<SyncMode>("local");
-  const [syncStatus, setSyncStatus] = useState("Đang tải dữ liệu local...");
+  const [syncStatus, setSyncStatus] = useState("Đang kiểm tra nguồn dữ liệu...");
 
   useEffect(() => {
     let intervalId: number | undefined;
     let canceled = false;
-    const backup = parseBackup(window.localStorage.getItem(localDataKey)) ?? createSeedLocalBackup();
-    window.localStorage.setItem(localDataKey, JSON.stringify(backup));
-    setData(backup.data);
 
-    void loadSheetConfig().then((sheetConfig) => {
+    void loadSheetConfig().then(async (sheetConfig) => {
       if (canceled) {
         return;
       }
 
       if (!isSheetConfigured(sheetConfig)) {
+        const backup = parseBackup(window.localStorage.getItem(localDataKey)) ?? createSeedLocalBackup();
+        window.localStorage.setItem(localDataKey, JSON.stringify(backup));
+        setData(backup.data);
         setSyncMode("local");
-        setSyncStatus("Đang dùng dữ liệu local trong trình duyệt.");
+        setSyncStatus("Chưa cấu hình Google Sheet, đang dùng dữ liệu local trong trình duyệt.");
         return;
       }
 
       setSyncMode("google-sheet");
 
-      async function pullSnapshot(showSuccess: boolean) {
+      const cachedSheet = readSheetCache(sheetConfig);
+
+      if (cachedSheet) {
+        setData(cachedSheet.data);
+        setSyncStatus(
+          `Đang dùng cache Google Sheet lúc ${formatSyncTime(cachedSheet.syncedAt)}, đang kiểm tra thay đổi...`,
+        );
+      } else {
+        setSyncStatus("Lần đầu tải dữ liệu từ Google Sheet...");
+      }
+
+      async function pullIfChanged(isFirstCheck: boolean) {
+        const cached = readSheetCache(sheetConfig);
+
         try {
-          const sheetData = await fetchSheetSnapshot(sheetConfig);
+          const meta = await fetchSheetMeta(sheetConfig);
+
           if (canceled) {
             return;
           }
-          setData(sheetData);
-          writeData(sheetData);
+
+          if (cached?.data && cached.revision === meta.revision) {
+            setData(cached.data);
+            setSyncStatus(
+              `Google Sheet chưa đổi, đang dùng dữ liệu đã lưu. Kiểm tra lại mỗi ${sheetMetaPollMs / 1000} giây.`,
+            );
+            return;
+          }
+
+          const snapshot = await fetchSheetSnapshotWithMeta(sheetConfig);
+
+          if (canceled) {
+            return;
+          }
+
+          setData(snapshot.data);
+          writeSheetCache(sheetConfig, snapshot.data, snapshot.revision || meta.revision);
           setSyncStatus(
-            showSuccess
-              ? "Đã đồng bộ Google Sheet."
-              : `Tự cập nhật từ Google Sheet lúc ${new Date().toLocaleTimeString("vi-VN")}.`,
+            isFirstCheck
+              ? "Đã tải dữ liệu mới từ Google Sheet."
+              : `Google Sheet có thay đổi, đã cập nhật lúc ${formatSyncTime(new Date())}.`,
           );
         } catch (error) {
-          setSyncStatus(error instanceof Error ? error.message : "Không đồng bộ được Google Sheet.");
+          if (canceled) {
+            return;
+          }
+
+          if (cached?.data) {
+            setData(cached.data);
+            setSyncStatus(
+              error instanceof Error
+                ? `Đang dùng cache Google Sheet. ${error.message}`
+                : "Đang dùng cache Google Sheet, chưa kiểm tra được thay đổi.",
+            );
+            return;
+          }
+
+          try {
+            const snapshot = await fetchSheetSnapshotWithMeta(sheetConfig);
+
+            if (canceled) {
+              return;
+            }
+
+            setData(snapshot.data);
+            writeSheetCache(sheetConfig, snapshot.data, snapshot.revision || `snapshot-${Date.now()}`);
+            setSyncStatus("Đã tải dữ liệu Google Sheet.");
+          } catch (snapshotError) {
+            setSyncStatus(
+              snapshotError instanceof Error
+                ? snapshotError.message
+                : "Không tải được dữ liệu Google Sheet.",
+            );
+          }
         }
       }
 
-      void pullSnapshot(true);
+      void pullIfChanged(true);
       intervalId = window.setInterval(() => {
-        void pullSnapshot(false);
-      }, 15000);
+        void pullIfChanged(false);
+      }, sheetMetaPollMs);
     });
 
     return () => {
@@ -163,11 +285,11 @@ export function useWarehouseStore() {
       try {
         setSyncMode("google-sheet");
         setSyncStatus("Đang ghi Google Sheet...");
-        const sheetData = await mutateSheet(type, formDataToPayload(formData), sheetConfig);
-        setData(sheetData);
-        writeData(sheetData);
+        const result = await mutateSheetWithMeta(type, formDataToPayload(formData), sheetConfig);
+        setData(result.data);
+        writeSheetCache(sheetConfig, result.data, result.revision || `mutate-${Date.now()}`);
         setLastMessage(message);
-        setSyncStatus("Đã ghi và đọc lại Google Sheet.");
+        setSyncStatus("Đã ghi Google Sheet và cập nhật cache.");
         return { ok: true, message };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Không ghi được Google Sheet.";
@@ -181,151 +303,171 @@ export function useWarehouseStore() {
   }
 
   function addProduct(formData: FormData) {
-    return commitRemoteOrLocal("addProduct", formData, (current) => {
-      const code = toText(formData.get("code"));
-      const product: Product = {
-        id: makeId("product"),
-        code,
-        name: toText(formData.get("name")),
-        category: toText(formData.get("category")),
-        size: toText(formData.get("size")),
-        unit: "thùng",
-        piecesPerBox: toNumber(formData.get("piecesPerBox")),
-        sqmPerBox: toNumber(formData.get("sqmPerBox")),
-        importPrice: toNumber(formData.get("importPrice")),
-        salePrice: toNumber(formData.get("salePrice")),
-        supplierId: toText(formData.get("supplierId")),
-        minStock: toNumber(formData.get("minStock")),
-        isActive: true,
-        note: toText(formData.get("note")),
-        createdAt: new Date().toISOString(),
-      };
+    return commitRemoteOrLocal(
+      "addProduct",
+      formData,
+      (current) => {
+        const code = toText(formData.get("code"));
+        const product: Product = {
+          id: makeId("product"),
+          code,
+          name: toText(formData.get("name")),
+          category: toText(formData.get("category")),
+          size: toText(formData.get("size")),
+          unit: "thùng",
+          piecesPerBox: toNumber(formData.get("piecesPerBox")),
+          sqmPerBox: toNumber(formData.get("sqmPerBox")),
+          importPrice: toNumber(formData.get("importPrice")),
+          salePrice: toNumber(formData.get("salePrice")),
+          supplierId: toText(formData.get("supplierId")),
+          minStock: toNumber(formData.get("minStock")),
+          isActive: true,
+          note: toText(formData.get("note")),
+          createdAt: new Date().toISOString(),
+        };
 
-      return {
-        ...current,
-        products: [product, ...current.products],
-        auditLogs: [
-          makeAudit("create", "products", code, `Tạo sản phẩm ${product.name}`),
-          ...current.auditLogs,
-        ],
-      };
-    }, "Đã thêm sản phẩm.");
+        return {
+          ...current,
+          products: [product, ...current.products],
+          auditLogs: [
+            makeAudit("create", "products", code, `Tạo sản phẩm ${product.name}`),
+            ...current.auditLogs,
+          ],
+        };
+      },
+      "Đã thêm sản phẩm.",
+    );
   }
 
   function addCustomer(formData: FormData) {
-    return commitRemoteOrLocal("addCustomer", formData, (current) => {
-      const customer: Customer = {
-        id: makeId("customer"),
-        name: toText(formData.get("name")),
-        phone: toText(formData.get("phone")),
-        address: toText(formData.get("address")),
-        customerGroup: toText(formData.get("customerGroup")),
-        note: toText(formData.get("note")),
-        createdAt: new Date().toISOString(),
-      };
+    return commitRemoteOrLocal(
+      "addCustomer",
+      formData,
+      (current) => {
+        const customer: Customer = {
+          id: makeId("customer"),
+          name: toText(formData.get("name")),
+          phone: toText(formData.get("phone")),
+          address: toText(formData.get("address")),
+          customerGroup: toText(formData.get("customerGroup")),
+          note: toText(formData.get("note")),
+          createdAt: new Date().toISOString(),
+        };
 
-      return {
-        ...current,
-        customers: [customer, ...current.customers],
-        auditLogs: [
-          makeAudit("create", "customers", customer.name, `Tạo khách hàng ${customer.name}`),
-          ...current.auditLogs,
-        ],
-      };
-    }, "Đã thêm khách hàng.");
+        return {
+          ...current,
+          customers: [customer, ...current.customers],
+          auditLogs: [
+            makeAudit("create", "customers", customer.name, `Tạo khách hàng ${customer.name}`),
+            ...current.auditLogs,
+          ],
+        };
+      },
+      "Đã thêm khách hàng.",
+    );
   }
 
   function addSupplier(formData: FormData) {
-    return commitRemoteOrLocal("addSupplier", formData, (current) => {
-      const supplier: Supplier = {
-        id: makeId("supplier"),
-        name: toText(formData.get("name")),
-        phone: toText(formData.get("phone")),
-        address: toText(formData.get("address")),
-        contactPerson: toText(formData.get("contactPerson")),
-        note: toText(formData.get("note")),
-        createdAt: new Date().toISOString(),
-      };
+    return commitRemoteOrLocal(
+      "addSupplier",
+      formData,
+      (current) => {
+        const supplier: Supplier = {
+          id: makeId("supplier"),
+          name: toText(formData.get("name")),
+          phone: toText(formData.get("phone")),
+          address: toText(formData.get("address")),
+          contactPerson: toText(formData.get("contactPerson")),
+          note: toText(formData.get("note")),
+          createdAt: new Date().toISOString(),
+        };
 
-      return {
-        ...current,
-        suppliers: [supplier, ...current.suppliers],
-        auditLogs: [
-          makeAudit("create", "suppliers", supplier.name, `Tạo nhà cung cấp ${supplier.name}`),
-          ...current.auditLogs,
-        ],
-      };
-    }, "Đã thêm nhà cung cấp.");
+        return {
+          ...current,
+          suppliers: [supplier, ...current.suppliers],
+          auditLogs: [
+            makeAudit("create", "suppliers", supplier.name, `Tạo nhà cung cấp ${supplier.name}`),
+            ...current.auditLogs,
+          ],
+        };
+      },
+      "Đã thêm nhà cung cấp.",
+    );
   }
 
   function addPurchase(formData: FormData) {
-    return commitRemoteOrLocal("addPurchase", formData, (current) => {
-      const quantity = toNumber(formData.get("quantity"));
-      const unitPrice = toNumber(formData.get("unitPrice"));
-      const paidAmount = toNumber(formData.get("paidAmount"));
-      const totalAmount = quantity * unitPrice;
-      const debtAmount = Math.max(totalAmount - paidAmount, 0);
-      const code = nextCode("PO", current.purchases.map((order) => order.code));
-      const id = makeId("purchase");
-      const orderDate = toText(formData.get("orderDate")) || getToday();
+    return commitRemoteOrLocal(
+      "addPurchase",
+      formData,
+      (current) => {
+        const quantity = toNumber(formData.get("quantity"));
+        const unitPrice = toNumber(formData.get("unitPrice"));
+        const paidAmount = toNumber(formData.get("paidAmount"));
+        const totalAmount = quantity * unitPrice;
+        const debtAmount = Math.max(totalAmount - paidAmount, 0);
+        const code = nextCode("PO", current.purchases.map((order) => order.code));
+        const id = makeId("purchase");
+        const orderDate = toText(formData.get("orderDate")) || getToday();
 
-      const purchase: PurchaseOrder = {
-        id,
-        code,
-        supplierId: toText(formData.get("supplierId")),
-        orderDate,
-        productId: toText(formData.get("productId")),
-        quantity,
-        unitPrice,
-        totalAmount,
-        paidAmount: Math.min(paidAmount, totalAmount),
-        debtAmount,
-        paymentMethod: toText(formData.get("paymentMethod")),
-        status: "confirmed",
-        note: toText(formData.get("note")),
-        createdAt: new Date().toISOString(),
-      };
+        const purchase: PurchaseOrder = {
+          id,
+          code,
+          supplierId: toText(formData.get("supplierId")),
+          orderDate,
+          productId: toText(formData.get("productId")),
+          quantity,
+          unitPrice,
+          totalAmount,
+          paidAmount: Math.min(paidAmount, totalAmount),
+          debtAmount,
+          paymentMethod: toText(formData.get("paymentMethod")),
+          status: "confirmed",
+          note: toText(formData.get("note")),
+          createdAt: new Date().toISOString(),
+        };
 
-      const movement: StockMovement = {
-        id: makeId("movement"),
-        productId: purchase.productId,
-        movementDate: orderDate,
-        quantity,
-        movementType: "purchase",
-        referenceType: "purchase_order",
-        referenceId: id,
-        note: `Nhập ${code}`,
-        createdAt: new Date().toISOString(),
-      };
+        const movement: StockMovement = {
+          id: makeId("movement"),
+          productId: purchase.productId,
+          movementDate: orderDate,
+          quantity,
+          movementType: "purchase",
+          referenceType: "purchase_order",
+          referenceId: id,
+          note: `Nhập ${code}`,
+          createdAt: new Date().toISOString(),
+        };
 
-      const payment: Payment | null =
-        purchase.paidAmount > 0
-          ? {
-              id: makeId("payment"),
-              paymentDate: orderDate,
-              direction: "out",
-              partyType: "supplier",
-              supplierId: purchase.supplierId,
-              referenceType: "purchase_order",
-              referenceId: id,
-              amount: purchase.paidAmount,
-              method: purchase.paymentMethod,
-              note: `Trả tiền ${code}`,
-              createdAt: new Date().toISOString(),
-            }
-          : null;
+        const payment: Payment | null =
+          purchase.paidAmount > 0
+            ? {
+                id: makeId("payment"),
+                paymentDate: orderDate,
+                direction: "out",
+                partyType: "supplier",
+                supplierId: purchase.supplierId,
+                referenceType: "purchase_order",
+                referenceId: id,
+                amount: purchase.paidAmount,
+                method: purchase.paymentMethod,
+                note: `Trả tiền ${code}`,
+                createdAt: new Date().toISOString(),
+              }
+            : null;
 
-      return {
-        ...current,
-        purchases: [purchase, ...current.purchases],
-        stockMovements: [movement, ...current.stockMovements],
-        payments: payment ? [payment, ...current.payments] : current.payments,
-        auditLogs: [
-          makeAudit("confirm", "purchase_orders", code, `Xác nhận nhập ${quantity} thùng`),
-          ...current.auditLogs,
-        ],
-      };
-    }, "Đã nhập kho và cộng tồn.");
+        return {
+          ...current,
+          purchases: [purchase, ...current.purchases],
+          stockMovements: [movement, ...current.stockMovements],
+          payments: payment ? [payment, ...current.payments] : current.payments,
+          auditLogs: [
+            makeAudit("confirm", "purchase_orders", code, `Xác nhận nhập ${quantity} thùng`),
+            ...current.auditLogs,
+          ],
+        };
+      },
+      "Đã nhập kho và cộng tồn.",
+    );
   }
 
   async function addSale(formData: FormData): Promise<ActionResult> {
@@ -344,8 +486,9 @@ export function useWarehouseStore() {
     const availableStock = getAvailableStock(data, productId);
 
     if (quantity <= 0) {
-      setLastMessage("Số lượng bán phải lớn hơn 0.");
-      return { ok: false, message: "Số lượng bán phải lớn hơn 0." };
+      const message = "Số lượng bán phải lớn hơn 0.";
+      setLastMessage(message);
+      return { ok: false, message };
     }
 
     if (availableStock < quantity) {
@@ -534,43 +677,193 @@ export function useWarehouseStore() {
     }, "Đã ghi nhận khách trả nợ và cập nhật công nợ.");
   }
 
-  function addExpense(formData: FormData) {
-    return commitRemoteOrLocal("addExpense", formData, (current) => {
-      const amount = toNumber(formData.get("amount"));
-      const expenseDate = toText(formData.get("expenseDate")) || getToday();
-      const expense: Expense = {
-        id: makeId("expense"),
-        category: toText(formData.get("category")),
-        amount,
-        expenseDate,
-        paymentMethod: toText(formData.get("paymentMethod")),
-        note: toText(formData.get("note")),
-        createdAt: new Date().toISOString(),
-      };
+  async function recordSupplierPayment(formData: FormData): Promise<ActionResult> {
+    const sheetConfig = await loadSheetConfig();
+
+    if (isSheetConfigured(sheetConfig)) {
+      return commitRemoteOrLocal(
+        "recordSupplierPayment",
+        formData,
+        (current) => current,
+        "Đã ghi nhận trả nợ nhà cung cấp và cập nhật công nợ.",
+      );
+    }
+
+    if (!data) {
+      return { ok: false, message: "Dữ liệu chưa sẵn sàng." };
+    }
+
+    const supplierId = toText(formData.get("supplierId"));
+    const amount = toNumber(formData.get("amount"));
+    const paymentDate = toText(formData.get("paymentDate")) || getToday();
+    const method = toText(formData.get("method")) || "Tiền mặt";
+    const note = toText(formData.get("note"));
+    const outstandingOrders = data.purchases
+      .filter((order) => order.supplierId === supplierId && order.status !== "canceled" && order.debtAmount > 0)
+      .sort((a, b) => a.orderDate.localeCompare(b.orderDate));
+    const totalDebt = outstandingOrders.reduce((total, order) => total + order.debtAmount, 0);
+
+    if (!supplierId) {
+      const message = "Chọn nhà cung cấp cần trả nợ.";
+      setLastMessage(message);
+      return { ok: false, message };
+    }
+
+    if (amount <= 0) {
+      const message = "Số tiền trả nợ phải lớn hơn 0.";
+      setLastMessage(message);
+      return { ok: false, message };
+    }
+
+    if (totalDebt <= 0) {
+      const message = "Nhà cung cấp này không còn công nợ.";
+      setLastMessage(message);
+      return { ok: false, message };
+    }
+
+    if (amount > totalDebt) {
+      const message = `Số tiền vượt công nợ hiện tại. Nhà cung cấp còn nợ ${totalDebt.toLocaleString("vi-VN")}đ.`;
+      setLastMessage(message);
+      return { ok: false, message };
+    }
+
+    return commit((current) => {
+      let remaining = amount;
+      const affectedCodes: string[] = [];
+      const updatedPurchases = current.purchases.map((order) => {
+        if (order.supplierId !== supplierId || order.status === "canceled" || order.debtAmount <= 0 || remaining <= 0) {
+          return order;
+        }
+
+        const paidForOrder = Math.min(order.debtAmount, remaining);
+        remaining -= paidForOrder;
+        affectedCodes.push(order.code);
+        const nextDebt = Math.max(order.debtAmount - paidForOrder, 0);
+
+        return {
+          ...order,
+          paidAmount: order.paidAmount + paidForOrder,
+          debtAmount: nextDebt,
+        };
+      });
 
       const payment: Payment = {
         id: makeId("payment"),
-        paymentDate: expenseDate,
+        paymentDate,
         direction: "out",
-        partyType: "other",
-        referenceType: "expense",
-        referenceId: expense.id,
+        partyType: "supplier",
+        supplierId,
+        referenceType: "manual",
+        referenceId: affectedCodes.join(", "),
         amount,
-        method: expense.paymentMethod,
-        note: expense.note,
+        method,
+        note: note || `Trả nợ nhà cung cấp: ${affectedCodes.join(", ")}`,
         createdAt: new Date().toISOString(),
       };
 
       return {
         ...current,
-        expenses: [expense, ...current.expenses],
+        purchases: updatedPurchases,
         payments: [payment, ...current.payments],
         auditLogs: [
-          makeAudit("create", "expenses", expense.category, `Tạo chi phí ${expense.category}`),
+          makeAudit(
+            "payment",
+            "supplier_debts",
+            affectedCodes.join(", "),
+            `Ghi nhận trả NCC ${amount.toLocaleString("vi-VN")}đ`,
+          ),
           ...current.auditLogs,
         ],
       };
-    }, "Đã thêm khoản chi.");
+    }, "Đã ghi nhận trả nợ nhà cung cấp và cập nhật công nợ.");
+  }
+
+  function addExpense(formData: FormData) {
+    return commitRemoteOrLocal(
+      "addExpense",
+      formData,
+      (current) => {
+        const amount = toNumber(formData.get("amount"));
+        const expenseDate = toText(formData.get("expenseDate")) || getToday();
+        const expense: Expense = {
+          id: makeId("expense"),
+          category: toText(formData.get("category")),
+          amount,
+          expenseDate,
+          paymentMethod: toText(formData.get("paymentMethod")),
+          note: toText(formData.get("note")),
+          createdAt: new Date().toISOString(),
+        };
+
+        const payment: Payment = {
+          id: makeId("payment"),
+          paymentDate: expenseDate,
+          direction: "out",
+          partyType: "other",
+          referenceType: "expense",
+          referenceId: expense.id,
+          amount,
+          method: expense.paymentMethod,
+          note: expense.note,
+          createdAt: new Date().toISOString(),
+        };
+
+        return {
+          ...current,
+          expenses: [expense, ...current.expenses],
+          payments: [payment, ...current.payments],
+          auditLogs: [
+            makeAudit("create", "expenses", expense.category, `Tạo chi phí ${expense.category}`),
+            ...current.auditLogs,
+          ],
+        };
+      },
+      "Đã thêm khoản chi.",
+    );
+  }
+
+  async function restoreBackup(backup: LocalBackup): Promise<ActionResult> {
+    if (backup.app !== "tile-warehouse-app" || backup.version !== 1 || !backup.data) {
+      const message = "File backup không đúng định dạng.";
+      setLastMessage(message);
+      return { ok: false, message };
+    }
+
+    const sheetConfig = await loadSheetConfig();
+
+    if (isSheetConfigured(sheetConfig)) {
+      try {
+        setSyncMode("google-sheet");
+        setSyncStatus("Đang phục hồi backup vào Google Sheet...");
+        const result = await postMutateSheetWithMeta(
+          "restoreBackup",
+          {
+            app: backup.app,
+            version: backup.version,
+            exportedAt: backup.exportedAt,
+            data: backup.data,
+          },
+          sheetConfig,
+        );
+
+        setData(result.data);
+        writeSheetCache(sheetConfig, result.data, result.revision || `restore-${Date.now()}`);
+        setLastMessage("Đã phục hồi backup vào Google Sheet.");
+        setSyncStatus("Đã phục hồi backup vào Google Sheet và cập nhật cache.");
+        return { ok: true, message: "Đã phục hồi backup vào Google Sheet." };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Không phục hồi được backup vào Google Sheet.";
+        setLastMessage(message);
+        setSyncStatus(message);
+        return { ok: false, message };
+      }
+    }
+
+    setData(backup.data);
+    writeData(backup.data);
+    setLastMessage("Đã phục hồi backup vào dữ liệu local.");
+    setSyncStatus("Đã phục hồi backup vào dữ liệu local trong trình duyệt.");
+    return { ok: true, message: "Đã phục hồi backup vào dữ liệu local." };
   }
 
   return {
@@ -586,7 +879,9 @@ export function useWarehouseStore() {
       addPurchase,
       addSale,
       recordCustomerPayment,
+      recordSupplierPayment,
       addExpense,
+      restoreBackup,
     },
   };
 }

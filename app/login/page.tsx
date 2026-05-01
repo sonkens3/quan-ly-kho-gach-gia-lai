@@ -1,11 +1,8 @@
-import { Warehouse } from "lucide-react";
+import { ShieldCheck, Warehouse } from "lucide-react";
 import { LoginForm } from "@/components/auth/login-form";
 import { Badge } from "@/components/ui/badge";
-import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 export default function LoginPage() {
-  const configured = isSupabaseConfigured();
-
   return (
     <main className="grid min-h-screen bg-slate-50 lg:grid-cols-[1fr_480px]">
       <section className="flex min-h-[36rem] items-center justify-center border-b border-slate-200 bg-white px-6 py-10 lg:border-b-0 lg:border-r">
@@ -15,7 +12,7 @@ export default function LoginPage() {
               <Warehouse className="h-6 w-6" aria-hidden="true" />
             </span>
             <div>
-              <h1 className="text-2xl font-semibold text-slate-950">Kho gạch realtime</h1>
+              <h1 className="text-2xl font-semibold text-slate-950">Kho gạch</h1>
               <p className="mt-1 text-sm text-slate-500">Quản lý hàng, tiền và công nợ</p>
             </div>
           </div>
@@ -25,7 +22,7 @@ export default function LoginPage() {
               ["Tồn kho", "Theo thùng, viên, m2"],
               ["Công nợ", "Khách hàng, nhà cung cấp"],
               ["Thu chi", "Phiếu thu, phiếu chi"],
-              ["Audit log", "Lưu lịch sử thao tác"],
+              ["Tài khoản", "Đọc từ file auth-users.json"],
             ].map(([title, value]) => (
               <div key={title} className="rounded-md border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-semibold text-slate-900">{title}</p>
@@ -41,9 +38,12 @@ export default function LoginPage() {
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-xl font-semibold text-slate-950">Đăng nhập</h2>
-              <p className="mt-1 text-sm text-slate-500">Tài khoản Supabase Auth</p>
+              <p className="mt-1 text-sm text-slate-500">Dùng tài khoản trong file cấu hình</p>
             </div>
-            {!configured ? <Badge tone="amber">Thiết lập</Badge> : null}
+            <Badge tone="green">
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              File
+            </Badge>
           </div>
           <LoginForm />
         </div>

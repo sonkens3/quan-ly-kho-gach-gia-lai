@@ -18,7 +18,7 @@ Nếu chưa cấu hình Google Sheet, app vẫn chạy local bằng `localStorag
 
 Điểm đánh đổi so với database thật:
 
-- Không realtime 100%, app tự đọc lại Google Sheet khoảng 15 giây/lần.
+- Không realtime 100%. App kiểm tra `revision` của Google Sheet khoảng 15 giây/lần; chỉ khi Sheet có thay đổi mới tải lại dữ liệu đầy đủ.
 - Phù hợp kho nhỏ/vừa, ít người ghi đồng thời.
 - App key trong GitHub Pages chỉ là lớp bảo vệ cơ bản, không thay thế phân quyền server chuyên nghiệp.
 
@@ -111,7 +111,47 @@ public/google-sheet-config.json
 
 13. Commit/push lên GitHub.
 
-Sau đó web sẽ tự đọc file cấu hình này và dùng Google Sheet làm dữ liệu trung tâm. Trên giao diện chỉ còn nút xuất/nhập backup, không hiện ô nhập URL/key nữa.
+Sau đó web sẽ tự đọc file cấu hình này và dùng Google Sheet làm dữ liệu trung tâm. Lần đầu app tải dữ liệu từ Sheet; các lần sau app dùng cache trong trình duyệt rồi chỉ kiểm tra `revision`, không tải lại toàn bộ nếu Sheet chưa đổi. Trên giao diện chỉ còn nút xuất/nhập backup, không hiện ô nhập URL/key nữa.
+
+Khi file `google-apps-script/Code.gs` trong project được cập nhật, cần copy lại toàn bộ code sang Apps Script và deploy lại Web App để tính năng kiểm tra `revision` hoạt động. Code mới cũng có `onEdit`, nên nếu bạn sửa trực tiếp trong Google Sheet thì `revision` sẽ tự đổi.
+
+## Tài khoản đăng nhập
+
+Tài khoản đăng nhập được lấy từ file:
+
+```text
+public/auth-users.json
+```
+
+Mặc định đang có tài khoản:
+
+```text
+Tên đăng nhập: admin
+Mật khẩu: admin123456
+```
+
+Muốn đổi hoặc thêm tài khoản, sửa file `public/auth-users.json`:
+
+```json
+{
+  "users": [
+    {
+      "username": "admin",
+      "email": "admin@kho.local",
+      "password": "mat-khau-moi",
+      "fullName": "Chu kho",
+      "role": "admin",
+      "active": true
+    }
+  ]
+}
+```
+
+Các quyền hợp lệ: `admin`, `partner`, `accountant`, `warehouse`.
+
+Thiết bị nào đăng nhập thành công một lần sẽ lưu phiên trong trình duyệt. Lần sau mở phần mềm sẽ tự vào trang chính; muốn bắt đăng nhập lại thì bấm **Đăng xuất**.
+
+Lưu ý bảo mật: vì GitHub Pages là web tĩnh nên file này nằm trong bản public. Cách này chỉ là lớp đăng nhập cơ bản, phù hợp dùng miễn phí và ít người dùng. Không nên dùng mật khẩu quan trọng giống email/ngân hàng.
 
 ## Chạy trên máy cá nhân
 
@@ -128,10 +168,10 @@ Mở:
 http://localhost:3000
 ```
 
-Đăng nhập chế độ miễn phí:
+Đăng nhập:
 
-- Email: nhập bất kỳ, ví dụ `admin@local.vn`
-- Mật khẩu: tối thiểu 6 ký tự
+- Tên đăng nhập: `admin`
+- Mật khẩu: `admin123456`
 
 ## Build bản static
 

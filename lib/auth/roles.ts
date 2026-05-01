@@ -61,6 +61,7 @@ export const routeRoles: Array<{ prefix: string; roles: UserRole[] }> = [
   { prefix: "/products", roles: ["admin", "partner", "accountant", "warehouse"] },
   { prefix: "/reports", roles: ["admin", "partner", "accountant"] },
   { prefix: "/audit-logs", roles: ["admin", "partner"] },
+  { prefix: "/guide", roles: ["admin", "partner", "accountant", "warehouse"] },
   { prefix: "/users", roles: ["admin"] },
   { prefix: "/settings", roles: ["admin"] },
 ];

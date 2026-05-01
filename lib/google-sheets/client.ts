@@ -13,11 +13,24 @@ export type SheetConfig = {
 type SheetResponse = {
   ok: boolean;
   version?: number;
+  revision?: string;
   data?: WarehouseData;
   error?: string;
 };
 
+export type SheetSnapshotResult = {
+  data: WarehouseData;
+  revision: string;
+};
+
+export type SheetMeta = {
+  revision: string;
+};
+
 let callbackCounter = 0;
+const metaTimeoutMs = 30000;
+const snapshotTimeoutMs = 60000;
+const mutateTimeoutMs = 90000;
 
 function getWindow() {
   return typeof window === "undefined" ? null : window;
@@ -98,11 +111,11 @@ export async function loadSheetConfig() {
   return getStoredSheetConfig();
 }
 
-function jsonpRequest(endpoint: string, params: Record<string, string>, timeoutMs = 20000) {
+function jsonpRequest(endpoint: string, params: Record<string, string>, timeoutMs = snapshotTimeoutMs) {
   const win = getWindow();
 
   if (!win) {
-    return Promise.reject(new Error("Không chạy trong trình duyệt."));
+    return Promise.reject(new Error("Khong chay trong trinh duyet."));
   }
 
   return new Promise<SheetResponse>((resolve, reject) => {
@@ -144,7 +157,7 @@ function jsonpRequest(endpoint: string, params: Record<string, string>, timeoutM
 
       settled = true;
       cleanup();
-      reject(new Error("Không kết nối được Google Apps Script."));
+      reject(new Error("Khong ket noi duoc Google Apps Script."));
     };
 
     const timeoutId = window.setTimeout(() => {
@@ -154,7 +167,7 @@ function jsonpRequest(endpoint: string, params: Record<string, string>, timeoutM
 
       settled = true;
       cleanup();
-      reject(new Error("Google Sheet phản hồi quá lâu."));
+      reject(new Error("Google Sheet phản hồi quá lâu. Có thể Sheet hoặc Apps Script đang chậm, hãy thử lại sau vài giây."));
     }, timeoutMs);
 
     script.src = url.toString();
@@ -162,25 +175,58 @@ function jsonpRequest(endpoint: string, params: Record<string, string>, timeoutM
   });
 }
 
-async function assertOk(response: SheetResponse) {
-  if (!response.ok || !response.data) {
-    throw new Error(response.error || "Google Sheet trả về dữ liệu không hợp lệ.");
-  }
-
-  return response.data;
+function getRevision(response: SheetResponse) {
+  return String(response.revision ?? "");
 }
 
-export async function fetchSheetSnapshot(config = getStoredSheetConfig()) {
+async function assertSnapshotOk(response: SheetResponse): Promise<SheetSnapshotResult> {
+  if (!response.ok || !response.data) {
+    throw new Error(response.error || "Google Sheet tra ve du lieu khong hop le.");
+  }
+
+  return {
+    data: response.data,
+    revision: getRevision(response),
+  };
+}
+
+async function assertMetaOk(response: SheetResponse): Promise<SheetMeta> {
+  if (!response.ok) {
+    throw new Error(response.error || "Khong kiem tra duoc thay doi Google Sheet.");
+  }
+
+  const revision = getRevision(response);
+
+  if (!revision) {
+    throw new Error("Apps Script chua ho tro kiem tra thay doi.");
+  }
+
+  return { revision };
+}
+
+export async function fetchSheetMeta(config = getStoredSheetConfig(), timeoutMs = metaTimeoutMs) {
+  const response = await jsonpRequest(config.endpoint, {
+    action: "meta",
+    key: config.appKey,
+  }, timeoutMs);
+  return assertMetaOk(response);
+}
+
+export async function fetchSheetSnapshotWithMeta(config = getStoredSheetConfig(), timeoutMs = snapshotTimeoutMs) {
   const response = await jsonpRequest(config.endpoint, {
     action: "snapshot",
     key: config.appKey,
-  });
-  return assertOk(response);
+  }, timeoutMs);
+  return assertSnapshotOk(response);
 }
 
-export async function mutateSheet(
+export async function fetchSheetSnapshot(config = getStoredSheetConfig()) {
+  return (await fetchSheetSnapshotWithMeta(config)).data;
+}
+
+export async function mutateSheetWithMeta(
   type: string,
-  payload: Record<string, FormDataEntryValue | string | number | undefined>,
+  payload: Record<string, unknown>,
   config = getStoredSheetConfig(),
 ) {
   const response = await jsonpRequest(config.endpoint, {
@@ -188,8 +234,54 @@ export async function mutateSheet(
     type,
     key: config.appKey,
     payload: JSON.stringify(payload),
+  }, mutateTimeoutMs);
+  return assertSnapshotOk(response);
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
   });
-  return assertOk(response);
+}
+
+export async function postMutateSheetWithMeta(
+  type: string,
+  payload: Record<string, unknown>,
+  config = getStoredSheetConfig(),
+) {
+  const before = await fetchSheetMeta(config).catch(() => null);
+  const body = new URLSearchParams();
+
+  body.set("action", "mutate");
+  body.set("type", type);
+  body.set("key", config.appKey);
+  body.set("payload", JSON.stringify(payload));
+
+  await fetch(config.endpoint, {
+    method: "POST",
+    mode: "no-cors",
+    body,
+  });
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await wait(1000);
+
+    const meta = await fetchSheetMeta(config, 10000).catch(() => null);
+
+    if (!before || (meta && meta.revision !== before.revision)) {
+      return fetchSheetSnapshotWithMeta(config, snapshotTimeoutMs);
+    }
+  }
+
+  return fetchSheetSnapshotWithMeta(config, snapshotTimeoutMs);
+}
+
+export async function mutateSheet(
+  type: string,
+  payload: Record<string, unknown>,
+  config = getStoredSheetConfig(),
+) {
+  return (await mutateSheetWithMeta(type, payload, config)).data;
 }
 
 export function formDataToPayload(formData: FormData) {

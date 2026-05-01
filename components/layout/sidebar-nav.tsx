@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BarChart3,
+  BookOpen,
   Boxes,
   Factory,
   History,
@@ -36,6 +37,7 @@ const iconMap: Record<NavIcon, LucideIcon> = {
   package: Package,
   "bar-chart": BarChart3,
   history: History,
+  "book-open": BookOpen,
   shield: ShieldCheck,
   settings: Settings,
 };

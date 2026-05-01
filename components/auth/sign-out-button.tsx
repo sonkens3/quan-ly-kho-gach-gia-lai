@@ -3,7 +3,7 @@
 import { LogOut } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { localSessionKey } from "@/lib/local/free-mode";
+import { clearFileAuthSession } from "@/lib/auth/file-auth";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
 
 export function SignOutButton() {
@@ -16,7 +16,7 @@ export function SignOutButton() {
       await supabase.auth.signOut();
     }
 
-    window.localStorage.removeItem(localSessionKey);
+    clearFileAuthSession();
     router.push("/login");
     router.refresh();
   }

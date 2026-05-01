@@ -1,23 +1,22 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { LockKeyhole, Mail } from "lucide-react";
+import { LockKeyhole, User } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  createSeedLocalBackup,
-  createLocalSession,
-  localDataKey,
-  localSessionKey,
-} from "@/lib/local/free-mode";
-import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
+  authenticateFromFile,
+  getStoredFileAuthSession,
+  saveFileAuthSession,
+} from "@/lib/auth/file-auth";
+import { createSeedLocalBackup, localDataKey } from "@/lib/local/free-mode";
 
 const loginSchema = z.object({
-  email: z.string().email("Email không hợp lệ"),
+  username: z.string().min(1, "Nhập tên đăng nhập"),
   password: z.string().min(6, "Mật khẩu cần ít nhất 6 ký tự"),
 });
 
@@ -27,7 +26,6 @@ export function LoginForm() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const supabase = getBrowserSupabaseClient();
 
   const {
     register,
@@ -36,38 +34,34 @@ export function LoginForm() {
   } = useForm<LoginValues>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
-      email: "",
+      username: "",
       password: "",
     },
   });
+
+  useEffect(() => {
+    if (getStoredFileAuthSession()) {
+      router.replace("/dashboard");
+    }
+  }, [router]);
 
   async function onSubmit(values: LoginValues) {
     setError(null);
     setIsSubmitting(true);
 
     try {
-      if (!supabase) {
-        window.localStorage.setItem(localSessionKey, JSON.stringify(createLocalSession(values.email)));
+      const session = await authenticateFromFile(values.username, values.password);
+      saveFileAuthSession(session);
 
-        if (!window.localStorage.getItem(localDataKey)) {
-          window.localStorage.setItem(localDataKey, JSON.stringify(createSeedLocalBackup()));
-        }
-
-        router.replace("/dashboard");
-        router.refresh();
-        return;
-      }
-
-      const { error: signInError } = await supabase.auth.signInWithPassword(values);
-
-      if (signInError) {
-        setError(signInError.message);
-        return;
+      if (!window.localStorage.getItem(localDataKey)) {
+        window.localStorage.setItem(localDataKey, JSON.stringify(createSeedLocalBackup()));
       }
 
       const nextPath = new URLSearchParams(window.location.search).get("next");
       router.replace(nextPath?.startsWith("/") ? nextPath : "/dashboard");
       router.refresh();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Không đăng nhập được.");
     } finally {
       setIsSubmitting(false);
     }
@@ -75,28 +69,28 @@ export function LoginForm() {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-      {!supabase ? (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          Chế độ miễn phí: nhập email bất kỳ và mật khẩu tối thiểu 6 ký tự để dùng dữ liệu cục bộ.
-        </div>
-      ) : null}
+      <div className="rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm text-cyan-900">
+        Tài khoản đăng nhập được đọc từ file{" "}
+        <span className="font-semibold">public/auth-users.json</span>. Thiết bị đã đăng nhập sẽ tự
+        vào trang chính trong lần sau.
+      </div>
 
       <div className="space-y-2">
-        <label className="text-sm font-medium text-slate-800" htmlFor="email">
-          Email
+        <label className="text-sm font-medium text-slate-800" htmlFor="username">
+          Tên đăng nhập
         </label>
         <div className="relative">
-          <Mail className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+          <User className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
           <Input
-            id="email"
-            type="email"
-            autoComplete="email"
+            id="username"
+            type="text"
+            autoComplete="username"
             className="pl-9"
-            placeholder="admin@kho-gach.vn"
-            {...register("email")}
+            placeholder="admin"
+            {...register("username")}
           />
         </div>
-        {errors.email ? <p className="text-sm text-red-600">{errors.email.message}</p> : null}
+        {errors.username ? <p className="text-sm text-red-600">{errors.username.message}</p> : null}
       </div>
 
       <div className="space-y-2">
@@ -114,9 +108,7 @@ export function LoginForm() {
             {...register("password")}
           />
         </div>
-        {errors.password ? (
-          <p className="text-sm text-red-600">{errors.password.message}</p>
-        ) : null}
+        {errors.password ? <p className="text-sm text-red-600">{errors.password.message}</p> : null}
       </div>
 
       {error ? (

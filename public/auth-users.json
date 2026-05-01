@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "email": "admin@kho.local",
+      "password": "admin123456",
+      "fullName": "Chu kho",
+      "role": "admin",
+      "active": true
+    }
+  ]
+}

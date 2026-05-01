@@ -1,18 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import { CalendarDays, Download, Filter, Plus, Search } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { CalendarDays, Download, Filter, Loader2, Plus, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AutoFileBackupAgent } from "@/components/local/auto-file-backup-agent";
+import { LocalModeTools } from "@/components/local/local-mode-tools";
 import { MoneyInput } from "@/components/ui/money-input";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/formatters";
+import { formatCurrency, formatDate, formatNumber, toDateKey } from "@/lib/formatters";
 import {
   getCustomerBought,
   getCustomerDebt,
   getCustomerName,
   getCustomerPaid,
+  getToday,
   getSupplierDebt,
   getSupplierImported,
   getSupplierName,
@@ -27,6 +30,94 @@ import { cn } from "@/lib/utils";
 type PageKey = keyof typeof modulePages;
 
 type Row = Record<string, string>;
+
+function normalizeFilterValue(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function formatPhone(value: string | number | null | undefined) {
+  const phone = String(value ?? "").trim();
+
+  if (!phone || phone.startsWith("+") || phone.startsWith("0")) {
+    return phone;
+  }
+
+  return /^\d{9}$/.test(phone) ? `0${phone}` : phone;
+}
+
+function escapeExcelValue(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function makeExportSlug(value: string) {
+  return (
+    value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "D")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "du-lieu"
+  );
+}
+
+function downloadExcelFile(
+  title: string,
+  columns: ModulePageConfig["columns"],
+  rows: Row[],
+) {
+  const today = new Date().toISOString().slice(0, 10);
+  const filename = `kho-gach-${makeExportSlug(title)}-${today}.xls`;
+  const headerCells = columns
+    .map((column) => `<th style="background:#e2e8f0;font-weight:bold">${escapeExcelValue(column.label)}</th>`)
+    .join("");
+  const bodyRows =
+    rows.length > 0
+      ? rows
+          .map(
+            (row) =>
+              `<tr>${columns
+                .map((column) => `<td style="mso-number-format:'\\@';">${escapeExcelValue(row[column.key] ?? "")}</td>`)
+                .join("")}</tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="${columns.length}">Không có dữ liệu</td></tr>`;
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px; }
+    th, td { border: 1px solid #94a3b8; padding: 6px 8px; vertical-align: top; }
+    h1 { font-family: Arial, sans-serif; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>${escapeExcelValue(title)}</h1>
+  <table>
+    <thead><tr>${headerCells}</tr></thead>
+    <tbody>${bodyRows}</tbody>
+  </table>
+</body>
+</html>`;
+  const blob = new Blob(["\ufeff", html], {
+    type: "application/vnd.ms-excel;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 
 const usageSteps = [
   {
@@ -121,7 +212,7 @@ function SelectField({
   );
 }
 
-function SettingsUsageGuide() {
+export function SettingsUsageGuide() {
   return (
     <section className="rounded-md border border-slate-200 bg-white shadow-soft">
       <div className="border-b border-slate-200 px-4 py-3">
@@ -159,9 +250,11 @@ function SettingsUsageGuide() {
   );
 }
 
-function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[] = []) {
+function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[] = []): Row[] {
   if (pageKey === "products") {
     return data.products.map((product) => ({
+      _date: toDateKey(product.createdAt),
+      _status: product.isActive ? "Đang bán" : "Ngừng bán",
       code: product.code,
       name: product.name,
       category: product.category,
@@ -174,8 +267,10 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "customers") {
     return data.customers.map((customer) => ({
+      _date: toDateKey(customer.createdAt),
+      _status: getCustomerDebt(data, customer.id) > 0 ? "Có công nợ Còn nợ" : "Không công nợ Đã tất toán",
       name: customer.name,
-      phone: customer.phone,
+      phone: formatPhone(customer.phone),
       address: customer.address,
       group: customer.customerGroup,
       total: formatCurrency(getCustomerBought(data, customer.id)),
@@ -185,8 +280,10 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "suppliers") {
     return data.suppliers.map((supplier) => ({
+      _date: toDateKey(supplier.createdAt),
+      _status: getSupplierDebt(data, supplier.id) > 0 ? "Có công nợ Còn nợ" : "Không công nợ Đã tất toán",
       name: supplier.name,
-      phone: supplier.phone,
+      phone: formatPhone(supplier.phone),
       contact: supplier.contactPerson,
       address: supplier.address,
       imported: formatCurrency(getSupplierImported(data, supplier.id)),
@@ -196,6 +293,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "purchases") {
     return data.purchases.map((order) => ({
+      _date: toDateKey(order.orderDate),
+      _status: `${order.status === "confirmed" ? "Đã xác nhận" : "Đã hủy"} ${order.debtAmount > 0 ? "Còn nợ" : "Đã trả đủ"}`,
       code: order.code,
       date: formatDate(order.orderDate),
       supplier: getSupplierName(data.suppliers, order.supplierId),
@@ -207,6 +306,16 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "sales") {
     return data.sales.map((order) => ({
+      _date: toDateKey(order.orderDate),
+      _status: [
+        order.status === "confirmed" ? "Đã xác nhận" : order.status === "completed" ? "Hoàn tất" : "Đã hủy",
+        order.deliveryStatus === "delivering"
+          ? "Đang giao"
+          : order.deliveryStatus === "delivered"
+            ? "Đã giao"
+            : "Chờ giao",
+        order.debtAmount > 0 ? "Còn nợ" : "Đã trả đủ",
+      ].join(" "),
       code: order.code,
       date: formatDate(order.orderDate),
       customer: getCustomerName(data.customers, order.customerId),
@@ -218,6 +327,15 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "inventory") {
     return inventory.map((item) => ({
+      _date: toDateKey(item.createdAt),
+      _status:
+        item.stockStatus === "out_of_stock"
+          ? "Hết hàng"
+          : item.stockStatus === "low_stock"
+            ? "Sắp hết"
+            : item.stockStatus === "inactive"
+              ? "Ngừng bán"
+              : "Còn hàng Đang bán",
       code: item.code,
       name: item.name,
       size: item.size,
@@ -246,8 +364,10 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
           .sort((a, b) => b.paymentDate.localeCompare(a.paymentDate));
 
         return {
+          _date: toDateKey(outstandingOrders[0]?.orderDate),
+          _status: getCustomerDebt(data, customer.id) > 0 ? "Còn nợ" : "Đã tất toán",
           customer: customer.name,
-          phone: customer.phone,
+          phone: formatPhone(customer.phone),
           debtDate: formatDate(outstandingOrders[0]?.orderDate),
           lastPaymentDate: formatDate(customerPayments[0]?.paymentDate),
           bought: formatCurrency(getCustomerBought(data, customer.id)),
@@ -270,6 +390,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
           .sort((a, b) => b.paymentDate.localeCompare(a.paymentDate));
 
         return {
+          _date: toDateKey(outstandingOrders[0]?.orderDate),
+          _status: getSupplierDebt(data, supplier.id) > 0 ? "Còn nợ" : "Đã tất toán",
           supplier: supplier.name,
           contact: supplier.contactPerson,
           debtDate: formatDate(outstandingOrders[0]?.orderDate),
@@ -285,6 +407,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "cashflow") {
     const payments = data.payments.map((payment) => ({
+      _date: toDateKey(payment.paymentDate),
+      _status: `${payment.direction === "in" ? "Thu" : "Chi"} ${payment.method}`,
       date: formatDate(payment.paymentDate),
       type: payment.direction === "in" ? "Thu" : "Chi",
       category:
@@ -303,6 +427,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
 
   if (pageKey === "audit-logs") {
     return data.auditLogs.map((log) => ({
+      _date: toDateKey(log.time),
+      _status: log.action,
       time: formatDate(log.time),
       user: log.user,
       action: log.action,
@@ -318,6 +444,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
     const expenses = sum(data.expenses.map((expense) => expense.amount));
     return [
       {
+        _date: getToday(),
+        _status: "Tạm tính",
         name: "Tổng hợp local",
         period: "Toàn bộ dữ liệu",
         revenue: formatCurrency(revenue),
@@ -331,6 +459,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
   if (pageKey === "users") {
     return [
       {
+        _date: getToday(),
+        _status: "Hoạt động",
         name: "Chủ kho local",
         email: "admin@local.vn",
         phone: "-",
@@ -344,6 +474,8 @@ function getRows(pageKey: PageKey, data: WarehouseData, inventory: InventoryRow[
   if (pageKey === "settings") {
     return [
       {
+        _date: getToday(),
+        _status: "Miễn phí",
         name: "Chế độ dữ liệu",
         value: "localStorage",
         scope: "Trình duyệt hiện tại",
@@ -432,12 +564,16 @@ function EntryForm({
   pageKey,
   data,
   onSubmit,
+  isSubmitting,
 }: {
   pageKey: PageKey;
   data: WarehouseData;
-  onSubmit: (formData: FormData) => void;
+  onSubmit: (formData: FormData) => void | Promise<void>;
+  isSubmitting: boolean;
 }) {
   const today = new Date().toISOString().slice(0, 10);
+  const supplierDebtOptions = data.suppliers.filter((supplier) => getSupplierDebt(data, supplier.id) > 0);
+  const supplierPaymentOptions = supplierDebtOptions.length > 0 ? supplierDebtOptions : data.suppliers;
 
   if (
     ![
@@ -448,6 +584,7 @@ function EntryForm({
       "sales",
       "cashflow",
       "customer-debts",
+      "supplier-debts",
     ].includes(pageKey)
   ) {
     return null;
@@ -455,7 +592,16 @@ function EntryForm({
 
   return (
     <form
-      action={onSubmit}
+      onSubmit={(event) => {
+        event.preventDefault();
+
+        if (isSubmitting) {
+          return;
+        }
+
+        void onSubmit(new FormData(event.currentTarget));
+      }}
+      aria-busy={isSubmitting}
       className="grid gap-3 rounded-md border border-cyan-100 bg-cyan-50 p-4 sm:grid-cols-2 xl:grid-cols-4"
     >
       {pageKey === "products" ? (
@@ -481,7 +627,7 @@ function EntryForm({
       {pageKey === "customers" ? (
         <>
           <Field label="Tên khách"><Input name="name" required /></Field>
-          <Field label="Số điện thoại"><Input name="phone" /></Field>
+          <Field label="Số điện thoại"><Input name="phone" type="tel" inputMode="tel" /></Field>
           <Field label="Địa chỉ"><Input name="address" /></Field>
           <Field label="Nhóm khách"><Input name="customerGroup" defaultValue="Bán lẻ" /></Field>
           <Field label="Ghi chú"><Input name="note" /></Field>
@@ -491,7 +637,7 @@ function EntryForm({
       {pageKey === "suppliers" ? (
         <>
           <Field label="Tên NCC"><Input name="name" required /></Field>
-          <Field label="Số điện thoại"><Input name="phone" /></Field>
+          <Field label="Số điện thoại"><Input name="phone" type="tel" inputMode="tel" /></Field>
           <Field label="Người liên hệ"><Input name="contactPerson" /></Field>
           <Field label="Địa chỉ"><Input name="address" /></Field>
           <Field label="Ghi chú"><Input name="note" /></Field>
@@ -570,10 +716,32 @@ function EntryForm({
         </>
       ) : null}
 
+      {pageKey === "supplier-debts" ? (
+        <>
+          <Field label="Ngày trả"><Input name="paymentDate" type="date" defaultValue={today} /></Field>
+          <Field label="Nhà cung cấp">
+            <SelectField name="supplierId" defaultValue={supplierPaymentOptions[0]?.id}>
+              {supplierPaymentOptions.map((supplier) => (
+                <option key={supplier.id} value={supplier.id}>
+                  {supplier.name} - nợ {formatCurrency(getSupplierDebt(data, supplier.id))}
+                </option>
+              ))}
+            </SelectField>
+          </Field>
+          <Field label="Số tiền trả NCC"><MoneyInput name="amount" required placeholder="1.000.000" /></Field>
+          <Field label="Phương thức"><Input name="method" defaultValue="Tiền mặt" /></Field>
+          <Field label="Ghi chú"><Input name="note" placeholder="VD: chuyển khoản trả NCC" /></Field>
+        </>
+      ) : null}
+
       <div className="flex items-end">
-        <Button type="submit" className="w-full">
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          Lưu
+        <Button type="submit" className="w-full" disabled={isSubmitting}>
+          {isSubmitting ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Plus className="h-4 w-4" aria-hidden="true" />
+          )}
+          {isSubmitting ? "Đang lưu..." : "Lưu"}
         </Button>
       </div>
     </form>
@@ -585,6 +753,10 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
   const { data, inventory, lastMessage, syncMode, syncStatus, actions } = useWarehouseStore();
   const [showForm, setShowForm] = useState(false);
   const [query, setQuery] = useState("");
+  const [dateFilter, setDateFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("Tất cả");
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const rows = useMemo<Row[]>(() => {
     if (!data) {
@@ -593,54 +765,118 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
 
     const pageRows = getRows(pageKey, data, inventory);
     const normalizedQuery = query.trim().toLowerCase();
+    const normalizedStatus = normalizeFilterValue(statusFilter);
 
-    if (!normalizedQuery) {
-      return pageRows;
-    }
+    return pageRows.filter((row) => {
+      if (dateFilter && row._date !== dateFilter) {
+        return false;
+      }
 
-    return pageRows.filter((row) =>
-      Object.values(row).some((value) => value.toLowerCase().includes(normalizedQuery)),
-    );
-  }, [data, inventory, pageKey, query]);
+      if (normalizedStatus && normalizedStatus !== "tất cả") {
+        const statusText = normalizeFilterValue(
+          [row._status, row.status, row.type, row.category].filter(Boolean).join(" "),
+        );
+
+        if (!statusText.includes(normalizedStatus)) {
+          return false;
+        }
+      }
+
+      if (!normalizedQuery) {
+        return true;
+      }
+
+      return Object.entries(row)
+        .filter(([key]) => !key.startsWith("_"))
+        .some(([, value]) => value.toLowerCase().includes(normalizedQuery));
+    });
+  }, [data, dateFilter, inventory, pageKey, query, statusFilter]);
 
   if (!data) {
-    return <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-600">Đang tải dữ liệu local...</div>;
+    return (
+      <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-600">
+        {syncStatus}
+      </div>
+    );
   }
 
   const stats = getStats(pageKey, config, data, inventory);
 
   async function handleSubmit(formData: FormData) {
-    const result =
-      pageKey === "products"
-        ? await actions.addProduct(formData)
-        : pageKey === "customers"
-          ? await actions.addCustomer(formData)
-          : pageKey === "suppliers"
-            ? await actions.addSupplier(formData)
-            : pageKey === "purchases"
-              ? await actions.addPurchase(formData)
-              : pageKey === "sales"
-                ? await actions.addSale(formData)
-                : pageKey === "cashflow"
-                  ? await actions.addExpense(formData)
-                  : pageKey === "customer-debts"
-                    ? await actions.recordCustomerPayment(formData)
-                    : { ok: false, message: "Trang này chưa có form nhập liệu." };
+    if (savingRef.current) {
+      return;
+    }
 
-    if (result.ok) {
-      setShowForm(false);
+    savingRef.current = true;
+    setIsSaving(true);
+
+    try {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+
+      const result =
+        pageKey === "products"
+          ? await actions.addProduct(formData)
+          : pageKey === "customers"
+            ? await actions.addCustomer(formData)
+            : pageKey === "suppliers"
+              ? await actions.addSupplier(formData)
+              : pageKey === "purchases"
+                ? await actions.addPurchase(formData)
+                : pageKey === "sales"
+                  ? await actions.addSale(formData)
+                  : pageKey === "cashflow"
+                    ? await actions.addExpense(formData)
+                    : pageKey === "customer-debts"
+                      ? await actions.recordCustomerPayment(formData)
+                      : pageKey === "supplier-debts"
+                        ? await actions.recordSupplierPayment(formData)
+                      : { ok: false, message: "Trang này chưa có form nhập liệu." };
+
+      if (result.ok) {
+        setShowForm(false);
+      }
+    } finally {
+      savingRef.current = false;
+      setIsSaving(false);
     }
   }
 
   return (
     <div className="space-y-5">
+      <AutoFileBackupAgent data={data} />
+
+      {isSaving ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/20 px-4 backdrop-blur-[1px]">
+          <div className="flex w-full max-w-sm items-center gap-3 rounded-md border border-slate-200 bg-white p-4 shadow-soft">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-cyan-50 text-cyan-700 ring-1 ring-cyan-100">
+              <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+            </span>
+            <div>
+              <p className="text-sm font-semibold text-slate-950">
+                {syncMode === "google-sheet" ? "Đang ghi Google Sheet..." : "Đang lưu dữ liệu..."}
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                Vui lòng chờ, hệ thống sẽ tự cập nhật khi xử lý xong.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-sm font-medium text-cyan-700">{config.eyebrow}</p>
           <h1 className="mt-1 text-2xl font-semibold text-slate-950">{config.title}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="secondary" size="sm" type="button">
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            onClick={() => downloadExcelFile(config.title, config.columns, rows)}
+          >
             <Download className="h-4 w-4" aria-hidden="true" />
             {config.exportLabel ?? "Xuất dữ liệu"}
           </Button>
@@ -652,8 +888,9 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
             "sales",
             "cashflow",
             "customer-debts",
+            "supplier-debts",
           ].includes(pageKey) ? (
-            <Button size="sm" type="button" onClick={() => setShowForm((value) => !value)}>
+            <Button size="sm" type="button" onClick={() => setShowForm((value) => !value)} disabled={isSaving}>
               <Plus className="h-4 w-4" aria-hidden="true" />
               {config.actionLabel}
             </Button>
@@ -667,16 +904,18 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
         </div>
       ) : null}
 
-      <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
-        Nguồn dữ liệu:{" "}
-        <span className="font-semibold text-slate-900">
-          {syncMode === "google-sheet" ? "Google Sheet" : "Local"}
-        </span>
-        {" - "}
-        {syncStatus}
-      </div>
+      {showForm ? (
+        <EntryForm pageKey={pageKey} data={data} onSubmit={handleSubmit} isSubmitting={isSaving} />
+      ) : null}
 
-      {showForm ? <EntryForm pageKey={pageKey} data={data} onSubmit={handleSubmit} /> : null}
+      {pageKey === "settings" ? (
+        <LocalModeTools
+          data={data}
+          disabled={isSaving}
+          onRestore={actions.restoreBackup}
+          syncMode={syncMode}
+        />
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {stats.map((stat) => (
@@ -684,7 +923,7 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
             <p className="text-sm text-slate-500">{stat.label}</p>
             <div className="mt-2 flex items-center justify-between gap-3">
               <p className="text-xl font-semibold text-slate-950">{stat.value}</p>
-              <Badge tone={stat.tone ?? "slate"}>Local</Badge>
+              <Badge tone={stat.tone ?? "slate"}>{syncMode === "google-sheet" ? "Sheet" : "Local"}</Badge>
             </div>
           </div>
         ))}
@@ -703,17 +942,36 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
           </div>
           <div className="relative">
             <CalendarDays className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
-            <Input className="pl-9" type="date" />
+            <Input
+              className="pl-9"
+              type="date"
+              value={dateFilter}
+              onChange={(event) => setDateFilter(event.target.value)}
+            />
           </div>
           <label className="relative block">
             <Filter className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
-            <select className="h-10 w-full rounded-md border border-input bg-white pl-9 pr-3 text-sm text-slate-800 outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-600/15">
+            <select
+              className="h-10 w-full rounded-md border border-input bg-white pl-9 pr-3 text-sm text-slate-800 outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-600/15"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
               {(config.statusFilters ?? ["Tất cả"]).map((filter) => (
-                <option key={filter}>{filter}</option>
+                <option key={filter} value={filter}>{filter}</option>
               ))}
             </select>
           </label>
-          <Button variant="secondary" type="button">Lọc</Button>
+          <Button
+            variant="secondary"
+            type="button"
+            onClick={() => {
+              setQuery("");
+              setDateFilter("");
+              setStatusFilter("Tất cả");
+            }}
+          >
+            Xóa lọc
+          </Button>
         </div>
 
         <div className="table-scroll overflow-x-auto">
@@ -767,7 +1025,6 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
         </div>
       </section>
 
-      {pageKey === "settings" ? <SettingsUsageGuide /> : null}
     </div>
   );
 }

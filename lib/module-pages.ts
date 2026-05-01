@@ -221,7 +221,7 @@ export const modulePages: Record<string, ModulePageConfig> = {
     title: "Báo cáo",
     eyebrow: "Tổng hợp",
     actionLabel: "Tạo báo cáo",
-    exportLabel: "Xuất PDF",
+    exportLabel: "Xuất Excel",
     stats: [
       { label: "Doanh thu", value: "0 đ", tone: "green" },
       { label: "Giá vốn", value: "0 đ", tone: "amber" },

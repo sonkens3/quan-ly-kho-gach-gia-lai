@@ -13,6 +13,7 @@ export type NavIcon =
   | "package"
   | "bar-chart"
   | "history"
+  | "book-open"
   | "shield"
   | "settings";
 
@@ -95,6 +96,12 @@ export const mainNavItems: NavItem[] = [
     label: "Nhật ký thao tác",
     icon: "history",
     roles: ["admin", "partner"],
+  },
+  {
+    href: "/guide",
+    label: "Hướng dẫn sử dụng",
+    icon: "book-open",
+    roles: ["admin", "partner", "accountant", "warehouse"],
   },
   {
     href: "/users",

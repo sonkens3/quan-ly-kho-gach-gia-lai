@@ -87,6 +87,23 @@ const TABLES = {
   settings: ["key", "value", "updatedAt"],
 };
 
+const BACKUP_TABLES = {
+  products: "products",
+  customers: "customers",
+  suppliers: "suppliers",
+  purchases: "purchase_orders",
+  sales: "sales_orders",
+  stockMovements: "stock_movements",
+  payments: "payments",
+  expenses: "expenses",
+  auditLogs: "audit_logs",
+};
+
+const DRIVE_BACKUP_FOLDER_NAME = "KhoGachKonTum-Backups";
+const DRIVE_BACKUP_LATEST_FILE = "kho-gach-backup-latest.json";
+const DRIVE_BACKUP_FILE_PREFIX = "kho-gach-backup-";
+const DRIVE_BACKUP_KEEP_FILES = 100;
+
 const NUMBER_FIELDS = new Set([
   "piecesPerBox",
   "sqmPerBox",
@@ -104,14 +121,71 @@ const NUMBER_FIELDS = new Set([
   "amount",
 ]);
 
+const TEXT_FIELDS = new Set([
+  "phone",
+]);
+
 function setup() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   Object.keys(TABLES).forEach((tableName) => ensureSheet_(ss, tableName));
   seedIfEmpty_();
+  getRevision_();
 }
 
 function setAppKey(appKey) {
   PropertiesService.getScriptProperties().setProperty("APP_KEY", String(appKey || ""));
+}
+
+function setupDriveBackupTrigger() {
+  ScriptApp.getProjectTriggers().forEach((trigger) => {
+    if (trigger.getHandlerFunction() === "backupNowToDrive") {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger("backupNowToDrive").timeBased().everyMinutes(10).create();
+  backupNowToDrive(true);
+  return "Đã bật backup Google Drive mỗi 10 phút.";
+}
+
+function stopDriveBackupTrigger() {
+  ScriptApp.getProjectTriggers().forEach((trigger) => {
+    if (trigger.getHandlerFunction() === "backupNowToDrive") {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  return "Đã tắt backup Google Drive tự động.";
+}
+
+function backupNowToDrive(force) {
+  const data = snapshot_();
+  const dataHash = makeHash_(JSON.stringify(data));
+  const previousHash = getSetting_("drive_backup_hash");
+
+  if (!force && previousHash === dataHash) {
+    return "Dữ liệu chưa thay đổi, không cần tạo backup mới.";
+  }
+
+  const exportedAt = now_();
+  const backup = {
+    app: "tile-warehouse-app",
+    version: APP_VERSION,
+    exportedAt,
+    data,
+  };
+  const content = JSON.stringify(backup, null, 2);
+  const folder = getDriveBackupFolder_();
+  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyyMMdd-HHmmss");
+  const filename = `${DRIVE_BACKUP_FILE_PREFIX}${timestamp}.json`;
+
+  upsertDriveTextFile_(folder, DRIVE_BACKUP_LATEST_FILE, content);
+  folder.createFile(filename, content, "application/json");
+  pruneDriveBackups_(folder);
+  setSetting_("drive_backup_hash", dataHash);
+  setSetting_("drive_backup_at", exportedAt);
+
+  return `Đã backup Google Drive: ${filename}`;
 }
 
 function doGet(e) {
@@ -120,6 +194,16 @@ function doGet(e) {
 
 function doPost(e) {
   return handleRequest_(e);
+}
+
+function onEdit(e) {
+  const range = e && e.range;
+  const sheet = range && range.getSheet();
+  const sheetName = sheet && sheet.getName();
+
+  if (sheetName && TABLES[sheetName] && sheetName !== "settings") {
+    touchRevision_();
+  }
 }
 
 function handleRequest_(e) {
@@ -131,7 +215,20 @@ function handleRequest_(e) {
     const action = params.action || "snapshot";
 
     if (action === "snapshot") {
-      return respond_(callback, { ok: true, version: APP_VERSION, data: snapshot_() });
+      return respond_(callback, {
+        ok: true,
+        version: APP_VERSION,
+        revision: getRevision_(),
+        data: snapshot_(),
+      });
+    }
+
+    if (action === "meta") {
+      return respond_(callback, {
+        ok: true,
+        version: APP_VERSION,
+        revision: getRevision_(),
+      });
     }
 
     if (action === "mutate") {
@@ -185,11 +282,14 @@ function mutate_(type, payload) {
     else if (type === "addPurchase") addPurchase_(payload);
     else if (type === "addSale") addSale_(payload);
     else if (type === "recordCustomerPayment") recordCustomerPayment_(payload);
+    else if (type === "recordSupplierPayment") recordSupplierPayment_(payload);
     else if (type === "addExpense") addExpense_(payload);
+    else if (type === "restoreBackup") restoreBackup_(payload);
     else throw new Error("Loại thao tác không hợp lệ.");
 
+    const revision = touchRevision_();
     SpreadsheetApp.flush();
-    return { ok: true, version: APP_VERSION, data: snapshot_() };
+    return { ok: true, version: APP_VERSION, revision, data: snapshot_() };
   } finally {
     lock.releaseLock();
   }
@@ -212,6 +312,30 @@ function snapshot_() {
   };
 }
 
+function restoreBackup_(payload) {
+  const data = payload && payload.data;
+
+  if (!data || typeof data !== "object") {
+    throw new Error("File backup không có dữ liệu để phục hồi.");
+  }
+
+  Object.keys(BACKUP_TABLES).forEach((dataKey) => {
+    const tableName = BACKUP_TABLES[dataKey];
+    const rows = Array.isArray(data[dataKey]) ? data[dataKey] : [];
+    writeTable_(tableName, rows);
+  });
+
+  appendRow_("audit_logs", {
+    id: makeId_("audit"),
+    time: now_(),
+    user: "Google Sheet API",
+    action: "restore",
+    tableName: "all",
+    recordCode: "backup",
+    note: `Phục hồi dữ liệu từ backup ${text_(payload.exportedAt) || ""}`.trim(),
+  });
+}
+
 function ensureSheet_(ss, tableName) {
   let sheet = ss.getSheetByName(tableName);
 
@@ -228,7 +352,30 @@ function ensureSheet_(ss, tableName) {
     sheet.setFrozenRows(1);
   }
 
+  applyTextColumnFormats_(sheet, headers);
+
   return sheet;
+}
+
+function applyTextColumnFormats_(sheet, headers) {
+  headers.forEach((header, index) => {
+    if (TEXT_FIELDS.has(header)) {
+      const column = index + 1;
+      sheet.getRange(1, column, sheet.getMaxRows(), 1).setNumberFormat("@");
+
+      const lastRow = sheet.getLastRow();
+      if (lastRow > 1) {
+        const range = sheet.getRange(2, column, lastRow - 1, 1);
+        const values = range.getValues();
+        const fixedValues = values.map((row) => [normalizeTextValue_(header, row[0])]);
+        const changed = fixedValues.some((row, rowIndex) => row[0] !== String(values[rowIndex][0] || "").trim());
+
+        if (changed) {
+          range.setValues(fixedValues);
+        }
+      }
+    }
+  });
 }
 
 function readTable_(tableName) {
@@ -260,26 +407,153 @@ function writeTable_(tableName, rows) {
 
   if (rows.length > 0) {
     sheet.getRange(2, 1, rows.length, headers.length).setValues(rows.map((row) => objectToRow_(headers, row)));
+    applyTextColumnFormats_(sheet, headers);
   }
+}
+
+function getSetting_(key) {
+  const rows = readTable_("settings");
+  const row = rows.find((item) => String(item.key) === String(key));
+  return row ? String(row.value || "") : "";
+}
+
+function setSetting_(key, value) {
+  const rows = readTable_("settings");
+  const index = rows.findIndex((item) => String(item.key) === String(key));
+  const nextRow = {
+    key: String(key),
+    value: String(value),
+    updatedAt: now_(),
+  };
+
+  if (index >= 0) {
+    rows[index] = nextRow;
+  } else {
+    rows.push(nextRow);
+  }
+
+  writeTable_("settings", rows);
+}
+
+function getRevision_() {
+  const revision = getSetting_("sheet_revision");
+
+  if (revision) {
+    return revision;
+  }
+
+  return touchRevision_();
+}
+
+function touchRevision_() {
+  const revision = `${Date.now()}-${Utilities.getUuid()}`;
+  setSetting_("sheet_revision", revision);
+  return revision;
+}
+
+function getDriveBackupFolder_() {
+  const folders = DriveApp.getFoldersByName(DRIVE_BACKUP_FOLDER_NAME);
+
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+
+  return DriveApp.createFolder(DRIVE_BACKUP_FOLDER_NAME);
+}
+
+function upsertDriveTextFile_(folder, filename, content) {
+  const files = folder.getFilesByName(filename);
+
+  if (files.hasNext()) {
+    const file = files.next();
+    file.setContent(content);
+    return file;
+  }
+
+  return folder.createFile(filename, content, "application/json");
+}
+
+function pruneDriveBackups_(folder) {
+  const files = [];
+  const iterator = folder.getFiles();
+
+  while (iterator.hasNext()) {
+    const file = iterator.next();
+    const name = file.getName();
+
+    if (name.indexOf(DRIVE_BACKUP_FILE_PREFIX) === 0 && name !== DRIVE_BACKUP_LATEST_FILE) {
+      files.push(file);
+    }
+  }
+
+  files
+    .sort((a, b) => b.getDateCreated().getTime() - a.getDateCreated().getTime())
+    .slice(DRIVE_BACKUP_KEEP_FILES)
+    .forEach((file) => file.setTrashed(true));
+}
+
+function makeHash_(content) {
+  const digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    content,
+    Utilities.Charset.UTF_8,
+  );
+
+  return Utilities.base64EncodeWebSafe(digest);
 }
 
 function appendRow_(tableName, row) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ensureSheet_(ss, tableName);
-  sheet.appendRow(objectToRow_(TABLES[tableName], row));
+  const headers = TABLES[tableName];
+  const nextRow = sheet.getLastRow() + 1;
+  sheet.getRange(nextRow, 1, 1, headers.length).setValues([objectToRow_(headers, row)]);
+  applyTextColumnFormats_(sheet, headers);
 }
 
 function rowToObject_(headers, row) {
   const obj = {};
   headers.forEach((header, index) => {
     const value = row[index];
-    obj[header] = NUMBER_FIELDS.has(header) ? Number(value || 0) : value;
+    obj[header] = NUMBER_FIELDS.has(header) ? Number(value || 0) : normalizeTextValue_(header, value);
   });
   return obj;
 }
 
 function objectToRow_(headers, obj) {
-  return headers.map((header) => (obj[header] === undefined ? "" : obj[header]));
+  return headers.map((header) => {
+    const value = obj[header] === undefined ? "" : obj[header];
+
+    if (TEXT_FIELDS.has(header)) {
+      return normalizeTextValue_(header, value);
+    }
+
+    return value;
+  });
+}
+
+function normalizeTextValue_(header, value) {
+  const text = String(value || "").trim();
+
+  if (header === "phone") {
+    return normalizePhone_(text);
+  }
+
+  return text;
+}
+
+function normalizePhone_(value) {
+  const text = String(value || "").trim();
+
+  if (!text || text[0] === "+" || text[0] === "0") {
+    return text;
+  }
+
+  if (/^\d{9}$/.test(text)) {
+    return `0${text}`;
+  }
+
+  return text;
 }
 
 function addProduct_(payload) {
@@ -523,6 +797,55 @@ function recordCustomerPayment_(payload) {
     createdAt: now_(),
   });
   audit_("payment", "customer_debts", affectedCodes.join(", "), `Ghi nhận khách trả ${formatVnd_(amount)}`);
+}
+
+function recordSupplierPayment_(payload) {
+  const supplierId = text_(payload.supplierId);
+  const amount = number_(payload.amount);
+  const paymentDate = text_(payload.paymentDate) || today_();
+  const purchases = readTable_("purchase_orders");
+  const outstandingOrders = purchases
+    .filter((order) => order.supplierId === supplierId && order.status !== "canceled" && number_(order.debtAmount) > 0)
+    .sort((a, b) => String(a.orderDate).localeCompare(String(b.orderDate)));
+  const totalDebt = outstandingOrders.reduce((total, order) => total + number_(order.debtAmount), 0);
+
+  if (!supplierId) throw new Error("Chon nha cung cap can tra no.");
+  if (amount <= 0) throw new Error("So tien tra no phai lon hon 0.");
+  if (totalDebt <= 0) throw new Error("Nha cung cap nay khong con cong no.");
+  if (amount > totalDebt) throw new Error(`So tien vuot cong no hien tai. Nha cung cap con no ${formatVnd_(totalDebt)}.`);
+
+  let remaining = amount;
+  const affectedCodes = [];
+  const updatedPurchases = purchases.map((order) => {
+    if (order.supplierId !== supplierId || order.status === "canceled" || number_(order.debtAmount) <= 0 || remaining <= 0) {
+      return order;
+    }
+
+    const paidForOrder = Math.min(number_(order.debtAmount), remaining);
+    remaining -= paidForOrder;
+    affectedCodes.push(order.code);
+    return Object.assign({}, order, {
+      paidAmount: number_(order.paidAmount) + paidForOrder,
+      debtAmount: Math.max(number_(order.debtAmount) - paidForOrder, 0),
+    });
+  });
+
+  writeTable_("purchase_orders", updatedPurchases);
+  appendRow_("payments", {
+    id: makeId_("payment"),
+    paymentDate,
+    direction: "out",
+    partyType: "supplier",
+    customerId: "",
+    supplierId,
+    referenceType: "manual",
+    referenceId: affectedCodes.join(", "),
+    amount,
+    method: text_(payload.method) || "Tien mat",
+    note: text_(payload.note) || `Tra no nha cung cap: ${affectedCodes.join(", ")}`,
+    createdAt: now_(),
+  });
+  audit_("payment", "supplier_debts", affectedCodes.join(", "), `Ghi nhan tra NCC ${formatVnd_(amount)}`);
 }
 
 function addExpense_(payload) {
