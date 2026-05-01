@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { CalendarDays, Download, Filter, Plus, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,63 @@ import { cn } from "@/lib/utils";
 type PageKey = keyof typeof modulePages;
 
 type Row = Record<string, string>;
+
+const usageSteps = [
+  {
+    title: "1. Tạo nhà cung cấp",
+    href: "/suppliers",
+    body:
+      "Vào Nhà cung cấp, bấm Thêm NCC, nhập tên nhà cung cấp, số điện thoại, người liên hệ, địa chỉ rồi bấm Lưu. Bước này nên làm trước để sản phẩm và phiếu nhập có nơi liên kết.",
+  },
+  {
+    title: "2. Tạo sản phẩm gạch",
+    href: "/products",
+    body:
+      "Vào Sản phẩm gạch, bấm Thêm sản phẩm. Nhập mã hàng, tên hàng, loại, kích thước, quy cách viên/thùng, m2/thùng, giá nhập, giá bán, nhà cung cấp và tồn tối thiểu. Mã hàng nên đặt rõ như G6060-A01 để dễ tìm.",
+  },
+  {
+    title: "3. Nhập hàng vào kho",
+    href: "/purchases",
+    body:
+      "Vào Nhập hàng, bấm Tạo phiếu nhập. Chọn ngày nhập, nhà cung cấp, sản phẩm, số lượng thùng, đơn giá nhập và số tiền đã trả. Khi lưu, hệ thống tự cộng tồn kho, ghi lịch sử nhập và tạo công nợ nhà cung cấp nếu chưa trả đủ.",
+  },
+  {
+    title: "4. Tạo khách hàng",
+    href: "/customers",
+    body:
+      "Vào Khách hàng, bấm Thêm khách. Nhập tên khách, số điện thoại, địa chỉ, nhóm khách và ghi chú nếu có. Nên tạo khách trước khi bán để công nợ và lịch sử mua hàng theo đúng người.",
+  },
+  {
+    title: "5. Tạo đơn bán hàng",
+    href: "/sales",
+    body:
+      "Vào Bán hàng, bấm Tạo đơn. Chọn ngày bán, khách hàng, sản phẩm, số lượng, đơn giá bán, chiết khấu, phí giao hàng và số tiền khách đã trả. Khi lưu, hệ thống kiểm tra tồn kho; nếu đủ hàng thì trừ tồn, ghi doanh thu và tạo công nợ nếu khách chưa trả đủ.",
+  },
+  {
+    title: "6. Ghi nhận khách trả nợ",
+    href: "/customer-debts",
+    body:
+      "Vào Nợ khách hàng, bấm Ghi nhận thu. Chọn ngày trả, khách hàng, nhập số tiền khách trả và phương thức thanh toán. Hệ thống tự trừ vào các đơn còn nợ cũ nhất trước, cập nhật đã trả, còn nợ, thu chi và nhật ký thao tác.",
+  },
+  {
+    title: "7. Kiểm tra tồn kho và công nợ",
+    href: "/inventory",
+    body:
+      "Vào Tồn kho để xem số thùng còn lại, giá trị tồn, hàng sắp hết hoặc hết hàng. Vào Nợ khách hàng và Nợ nhà cung cấp để xem ngày phát sinh nợ, lần trả gần nhất, tổng đã mua/nhập, đã trả và còn nợ.",
+  },
+  {
+    title: "8. Theo dõi thu chi và báo cáo",
+    href: "/cashflow",
+    body:
+      "Vào Thu chi để xem tiền thu từ bán hàng, khách trả nợ, tiền chi nhập hàng và các khoản chi phí. Vào Báo cáo để xem tổng hợp doanh thu, chi phí, giá vốn tạm tính và lợi nhuận tạm tính.",
+  },
+  {
+    title: "9. Sao lưu dữ liệu",
+    href: "/settings",
+    body:
+      "Ở khung Backup dữ liệu, bấm Xuất backup để tải file JSON về máy. Khi dùng máy khác hoặc cần phục hồi, bấm Nhập backup và chọn file đã xuất. Nếu đang dùng Google Sheet, dữ liệu chính vẫn nằm trong Sheet và app tự đọc lại định kỳ.",
+  },
+];
 
 function Field({
   label,
@@ -60,6 +118,44 @@ function SelectField({
     >
       {children}
     </select>
+  );
+}
+
+function SettingsUsageGuide() {
+  return (
+    <section className="rounded-md border border-slate-200 bg-white shadow-soft">
+      <div className="border-b border-slate-200 px-4 py-3">
+        <p className="text-sm font-medium text-cyan-700">Hướng dẫn sử dụng</p>
+        <h2 className="mt-1 text-lg font-semibold text-slate-950">
+          Quy trình dùng phần mềm kho gạch
+        </h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Làm theo thứ tự dưới đây để dữ liệu tồn kho, công nợ và thu chi tự khớp với nhau.
+        </p>
+      </div>
+
+      <div className="grid gap-3 p-4 lg:grid-cols-2">
+        {usageSteps.map((step) => (
+          <div key={step.title} className="rounded-md border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <h3 className="text-sm font-semibold text-slate-950">{step.title}</h3>
+              <Link
+                href={step.href}
+                className="text-sm font-medium text-cyan-700 hover:text-cyan-900"
+              >
+                Mở trang
+              </Link>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-slate-600">{step.body}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border-t border-slate-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+        Lưu ý: trước khi bán hàng phải có sản phẩm và tồn kho. Nếu hệ thống báo không đủ tồn,
+        hãy nhập hàng trước hoặc kiểm tra lại lịch sử nhập/bán của mã hàng đó.
+      </div>
+    </section>
   );
 }
 
@@ -670,6 +766,8 @@ export function LocalWorkspacePage({ pageKey }: { pageKey: PageKey }) {
           </table>
         </div>
       </section>
+
+      {pageKey === "settings" ? <SettingsUsageGuide /> : null}
     </div>
   );
 }
